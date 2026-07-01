@@ -70,8 +70,10 @@ class SectionInput:
 class SectionProps:
     """截面几何特性"""
     A: float = 0.0               # 面积 (mm²)
-    I_x: float = 0.0             # 惯性矩 (mm⁴)
-    W_x: float = 0.0             # 截面模量 (mm³)
+    I_x: float = 0.0             # 惯性矩绕强轴 (mm⁴)
+    I_y: float = 0.0             # 惯性矩绕弱轴 (mm⁴)
+    i_y: float = 0.0             # 弱轴回转半径 (mm)
+    W_x: float = 0.0             # 截面模量绕强轴 (mm³)
     S: float = 0.0               # 半截面面积矩 (mm³)
     S_f: float = 0.0             # 翼缘对中性轴面积矩 (mm³)
     h: float = 0.0               # 总高 (mm)
@@ -99,8 +101,13 @@ class StiffenerDesign:
     bearing_t: float = 16.0      # 厚 (mm)
     sigma_ce: float = 0.0        # 端面承压应力 (MPa)
     sigma_stab: float = 0.0      # 稳定应力 (MPa)
+    phi_bearing: float = 0.0     # 支座加劲肋稳定系数 φ
     ce_ok: bool = True
     stab_ok: bool = True
+    # 腹板受剪屈曲
+    tau_web: float = 0.0         # 腹板平均剪应力 (MPa)
+    tau_cr: float = 0.0          # 剪切屈曲临界应力 (MPa)
+    shear_buckling_ok: bool = True
 
 
 @dataclass
@@ -151,12 +158,25 @@ class ChecksResult:
     sigma_zs_var: float = 0.0; sigma_zs_var_ok: bool = True; sigma_zs_var_limit: float = 0.0
     # 整体稳定
     overall_stable: bool = True
+    overall_exempt: bool = True        # 是否满足免算条件
+    stability_L1: float = 0.0          # 受压翼缘自由长度 (mm)
+    stability_ratio: float = 0.0        # L1 / b_f
+    stability_limit: float = 0.0        # 规范限值 (已修正)
+    stability_lambda_y: float = 0.0     # 弱轴长细比 λ_y
+    stability_phi_b: float = 0.0        # 整体稳定系数 φ_b
+    stability_sigma: float = 0.0        # 整体稳定验算应力 (MPa)
+    # 翼缘局部稳定
+    flange_local_ratio: float = 0.0     # b1 / t_f
+    flange_local_limit: float = 0.0     # 限值 15√(235/f_y)
+    flange_local_ok: bool = True
     # 疲劳
     fatigue_base_ok: bool = True
     fatigue_weld_ok: bool = True
     # 支座加劲肋
     bearing_ce_ok: bool = True
     bearing_stab_ok: bool = True
+    # 腹板受剪屈曲
+    shear_buckling_ok: bool = True
 
     def all_ok(self) -> bool:
         checks = [
@@ -165,6 +185,7 @@ class ChecksResult:
             self.fatigue_base_ok, self.fatigue_weld_ok,
             self.sigma_var_ok, self.tau_var_ok, self.sigma_zs_var_ok,
             self.bearing_ce_ok, self.bearing_stab_ok,
+            self.shear_buckling_ok, self.flange_local_ok,
         ]
         return all(checks)
 
@@ -249,26 +270,27 @@ def calc_steel_self_weight(A_mm2: float) -> float:
 
 def calc_section_props(h_w: float, t_w: float, b_f: float, t_f: float) -> SectionProps:
     """计算双轴对称工字形截面几何特性 (尺寸单位 mm)
-    返回单位: A(mm²), I_x(mm⁴), W_x(mm³), S(mm³), S_f(mm³), h(mm), g1(kN/m)
+    返回单位: A(mm²), I_x(mm⁴), I_y(mm⁴), i_y(mm), W_x(mm³), ...
     """
     h = h_w + 2.0 * t_f
     A = h_w * t_w + 2.0 * b_f * t_f
-    # 腹板惯性矩
+    # 强轴 x-x
     I_w = t_w * h_w ** 3 / 12.0
-    # 单翼缘对自身形心惯性矩 + 移轴
-    d_f = (h_w + t_f) / 2.0  # 翼缘形心到中性轴距离
-    I_f = 2.0 * (b_f * t_f ** 3 / 12.0 + b_f * t_f * d_f ** 2)
-    I_x = I_w + I_f
+    d_f = (h_w + t_f) / 2.0
+    I_fx = 2.0 * (b_f * t_f ** 3 / 12.0 + b_f * t_f * d_f ** 2)
+    I_x = I_w + I_fx
     W_x = I_x / (h / 2.0) if h > 0 else 0.0
-    # 半截面对中性轴面积矩
     S = b_f * t_f * d_f + t_w * (h_w / 2.0) ** 2 / 2.0
-    # 翼缘对中性轴面积矩
     S_f = b_f * t_f * d_f
-    # 腹板-翼缘交界距中性轴
     y_j = h_w / 2.0
+    # 弱轴 y-y
+    I_fy = 2.0 * (t_f * b_f ** 3 / 12.0)
+    I_wy = h_w * t_w ** 3 / 12.0
+    I_y = I_fy + I_wy
+    i_y = math.sqrt(I_y / A) if A > 0 else 0.0
     g1 = calc_steel_self_weight(A)
     return SectionProps(
-        A=A, I_x=I_x, W_x=W_x, S=S, S_f=S_f, h=h,
+        A=A, I_x=I_x, I_y=I_y, i_y=i_y, W_x=W_x, S=S, S_f=S_f, h=h,
         h_w=h_w, t_w=t_w, b_f=b_f, t_f=t_f, g1=g1, y_j=y_j
     )
 
@@ -451,6 +473,8 @@ def auto_estimate_section(L: float, M_Ed0: float, f_d: float,
     h_w_est = _round_to(h_w_est, 50.0)
     if h_w_est < 500:
         h_w_est = 500.0
+    if h_w_est + 2.0 * t_f_est < h_min:
+        h_w_est += 50.0
 
     # 6. 腹板厚度
     t_w_est = max(h_w_est / 170.0, 8.0)
@@ -498,8 +522,28 @@ def auto_estimate_section(L: float, M_Ed0: float, f_d: float,
 # 加劲肋设计
 # ============================================================
 
+def _column_stability_coefficient(lam: float, f_y: float = 345.0,
+                                   E: float = 2.06e5, curve: str = "b") -> float:
+    """轴压稳定系数 φ (GB 50017-2017 附录D)
+    lam: 长细比, f_y: 屈服强度 (MPa), E: 弹性模量 (MPa)
+    curve: 截面类别 ("a", "b", "c", "d")
+    """
+    lam_n = lam / math.pi * math.sqrt(f_y / E)
+    coef = {"a": (0.41, 0.986, 0.152), "b": (0.65, 0.965, 0.300),
+            "c": (0.73, 0.906, 0.595), "d": (1.35, 0.868, 0.915)}
+    alpha1, alpha2, alpha3 = coef.get(curve, coef["b"])
+    if lam_n <= 0.215:
+        phi = 1.0 - alpha1 * lam_n ** 2
+    else:
+        phi = ((alpha2 + alpha3 * lam_n + lam_n ** 2)
+               - math.sqrt((alpha2 + alpha3 * lam_n + lam_n ** 2) ** 2
+                           - 4.0 * lam_n ** 2)) / (2.0 * lam_n ** 2)
+    return min(phi, 1.0)
+
+
 def design_stiffeners(h_w: float, t_w: float, V_Ed: float,
-                       L: float, f_d: float, f_ce: float) -> StiffenerDesign:
+                       L: float, f_d: float, f_ce: float,
+                       f_vd: float = 160.0, f_y: float = 345.0) -> StiffenerDesign:
     """加劲肋设计 (JTG D64-2015 第5.7节)
     h_w, t_w: mm, V_Ed: kN, L: m, f_d/f_ce: MPa
     """
@@ -555,16 +599,31 @@ def design_stiffeners(h_w: float, t_w: float, V_Ed: float,
              + web_contrib * t_w ** 3 / 12.0)
     i_eff = math.sqrt(I_eff / A_eff) if A_eff > 0 else 1.0
     lam = h_w / i_eff
-    # 简化稳定系数 (a类截面)
-    if lam <= 30:
-        phi = 0.900
-    elif lam <= 60:
-        phi = 0.900 - (lam - 30) * (0.900 - 0.800) / 30.0
-    else:
-        phi = 0.700
+    phi = _column_stability_coefficient(lam, curve="b")
+    result.phi_bearing = phi
     if A_eff > 0:
         result.sigma_stab = V_Ed * 1e3 / (phi * A_eff)
     result.stab_ok = result.sigma_stab <= f_d
+
+    # --- 腹板区格受剪屈曲验算 (JTG D64-2015 §5.7.4) ---
+    if result.need_transverse:
+        a = result.spacing
+        ratio_a_hw = a / h_w
+        if ratio_a_hw >= 1.0:
+            k_tau = 5.34 + 4.00 / ratio_a_hw ** 2
+        else:
+            k_tau = 4.00 + 5.34 / ratio_a_hw ** 2
+        eps_k = math.sqrt(235.0 / f_y)
+        lam_s = (h_w / t_w) / (41.0 * eps_k * math.sqrt(k_tau))
+        if lam_s <= 0.8:
+            tau_cr = f_vd
+        elif lam_s <= 1.2:
+            tau_cr = (1.0 - 0.59 * (lam_s - 0.8)) * f_vd
+        else:
+            tau_cr = 1.1 * f_vd / lam_s ** 2
+        result.tau_web = V_Ed * 1e3 / (h_w * t_w) if t_w > 0 else 0.0
+        result.tau_cr = tau_cr
+        result.shear_buckling_ok = result.tau_web <= tau_cr
 
     return result
 
@@ -608,6 +667,84 @@ def design_welds(sec_mid: SectionInput, props_mid: SectionProps,
     w.h_f_chosen = h_f_chosen
 
     return w
+
+
+# ============================================================
+# 整体稳定验算 (JTG D64-2015 第5.5条) + 翼缘局部稳定
+# ============================================================
+
+def get_fy(steel_grade: str = "Q345") -> float:
+    """返回钢材屈服强度 f_y (MPa)"""
+    return {"Q235": 235.0, "Q345": 345.0, "Q390": 390.0, "Q420": 420.0}.get(steel_grade, 345.0)
+
+
+def check_overall_stability(b_f: float, steel_grade: str = "Q345",
+                             L1: float = 0.0) -> Tuple[float, float, bool]:
+    """
+    整体稳定"免算"条件 (JTG D64-2015 第5.5.2条)
+    
+    无铺板时: L1 / b_f ≤ 13 × √(235/f_y) 可不计算整体稳定性
+    
+    L1: 受压翼缘侧向自由长度 (mm)
+    b_f: 翼缘总宽度 (mm)
+    返回: (比值 L1/b_f, 修正后限值, 满足?)
+    """
+    fy = get_fy(steel_grade)
+    correction = math.sqrt(235.0 / fy)
+    limit = 13.0 * correction
+    ratio = L1 / b_f if b_f > 0 else 0.0
+    return ratio, limit, ratio <= limit
+
+
+def check_flange_local_stability(b_f: float, t_w: float, t_f: float,
+                                  steel_grade: str = "Q345") -> Tuple[float, float, float, bool]:
+    """
+    翼缘局部稳定验算 (JTG D64-2015 第5.7节)
+    
+    b1 = (b_f - t_w) / 2  — 翼缘自由外伸宽度 (mm)
+    b1 / t_f ≤ 15 × √(235/f_y)
+    
+    返回: (b1, b1/t_f, 限值, 满足?)
+    """
+    fy = get_fy(steel_grade)
+    correction = math.sqrt(235.0 / fy)
+    limit = 15.0 * correction
+    b1 = (b_f - t_w) / 2.0
+    ratio = b1 / t_f if t_f > 0 else 0.0
+    return b1, ratio, limit, ratio <= limit
+
+
+def check_overall_buckling(i_y: float, L1: float, A: float, h: float, W_x: float,
+                            steel_grade: str = "Q345") -> Tuple[float, float, bool]:
+    """
+    整体稳定承载力验算 (JTG D64-2015 附录)
+    
+    当不满足免算条件时，需计算整体稳定系数 φ_b 进行验算：
+      λ_y = L1 / i_y
+      φ_b = 1.07 - λ_y² / (44000 × ε_k²)     (λ_y ≤ 120√(235/f_y))
+      σ = M_Ed / (φ_b × W_x) ≤ f_d
+    
+    i_y: 弱轴回转半径 (mm)
+    L1: 侧向自由长度 (mm)
+    A: 截面面积 (mm²)
+    h: 截面总高 (mm)
+    W_x: 强轴截面模量 (mm³)
+    返回: (λ_y, φ_b, φ_b 是否有效且 > 0)
+    """
+    fy = get_fy(steel_grade)
+    eps_k = math.sqrt(235.0 / fy)
+    lambda_y = L1 / i_y if i_y > 0 else 9999.0
+    lambda_limit = 120.0 * eps_k
+    if lambda_y <= lambda_limit:
+        phi_b = 1.07 - lambda_y ** 2 / (44000.0 * eps_k ** 2)
+    else:
+        phi_b = 0.0  # 超出公式范围
+    if phi_b > 1.0:
+        phi_b = 1.0
+    if phi_b < 0.0:
+        phi_b = 0.0
+    valid = phi_b > 0.0
+    return lambda_y, phi_b, valid
 
 
 # ============================================================
@@ -745,8 +882,17 @@ def calculate(params: DesignParams, section: Optional[SectionInput] = None) -> C
     c.sigma_zs_var = sigma_zs_var
     c.sigma_zs_var_limit = 1.1 * f_d_var
 
-    # 整体稳定
-    c.overall_stable = True  # 混凝土桥面板提供侧向支撑
+    # 整体稳定 (JTG D64-2015 第5.5.2条)
+    # 成桥工况：混凝土桥面板牢固连接在受压翼缘上，
+    # 满足规范第5.5.2条第1款免算条件，整体稳定自然满足
+    c.overall_stable = True
+    c.overall_exempt = True
+
+    # 翼缘局部稳定
+    fl_b1, fl_ratio, fl_limit, c.flange_local_ok = check_flange_local_stability(
+        section.b_f, section.t_w, section.t_f, params.steel_grade)
+    c.flange_local_ratio = fl_ratio
+    c.flange_local_limit = fl_limit
 
     # --- 8. 疲劳验算 ---
     fatigue = check_fatigue(L, Q_K, P_k_orig, params.eta, props_mid.W_x)
@@ -755,14 +901,17 @@ def calculate(params: DesignParams, section: Optional[SectionInput] = None) -> C
     c.fatigue_weld_ok = fatigue.check_fillet_weld
 
     # --- 9. 焊缝设计 ---
-    welds = design_welds(section, props_mid, section, props_var, V_Ed, V_Ed_x)
+    sec_var_for_weld = SectionInput(h_w=section.h_w, t_w=section.t_w,
+                                     b_f=section.b_f2, t_f=section.t_f2)
+    welds = design_welds(section, props_mid, sec_var_for_weld, props_var, V_Ed, V_Ed_x)
     result.welds = welds
 
     # --- 10. 加劲肋设计 ---
-    stiffeners = design_stiffeners(section.h_w, section.t_w, V_Ed, L, f_d_mid, f_ce_mid)
+    stiffeners = design_stiffeners(section.h_w, section.t_w, V_Ed, L, f_d_mid, f_ce_mid, f_vd_mid)
     result.stiffeners = stiffeners
     c.bearing_ce_ok = stiffeners.ce_ok
     c.bearing_stab_ok = stiffeners.stab_ok
+    c.shear_buckling_ok = stiffeners.shear_buckling_ok
 
     return result
 

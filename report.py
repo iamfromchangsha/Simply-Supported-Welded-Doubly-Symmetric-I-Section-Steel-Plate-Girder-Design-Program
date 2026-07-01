@@ -275,6 +275,365 @@ def _make_cross_section_svg(h_w, t_w, b_f, t_f, h):
 
 
 # ============================================================
+# 弯矩图 + 剪力图 (纯 SVG)
+# ============================================================
+
+def _make_moment_shear_diagrams(L, g, q, P, P_s, x_cut,
+                                  M_gk, M_qk, M_Ed,
+                                  M_gk_x, M_qk_x, M_Ed_x,
+                                  V_gk, V_qk, V_Ed,
+                                  V_gk_x=None, V_qk_x=None, V_Ed_x=None):
+    """生成简支梁弯矩图和剪力图组合"""
+    svg_w, svg_h = 700, 520
+    margin_l, margin_r, margin_t, margin_b = 80, 40, 30, 50
+    plot_w = svg_w - margin_l - margin_r
+    plot_h_m = 180  # 弯矩图高度
+    plot_h_v = 160  # 剪力图高度
+    y_m_top = margin_t
+    y_v_top = margin_t + plot_h_m + 60
+    x_left = margin_l
+    x_right = margin_l + plot_w
+    y_m_bot = y_m_top + plot_h_m
+    y_v_bot = y_v_top + plot_h_v
+
+    def px(x_m):
+        """将位置 x (m) 映射到 SVG x 坐标"""
+        return margin_l + x_m / L * plot_w
+
+    def py_m(M):
+        """将弯矩 (kN·m) 映射到 SVG y (向下为正)"""
+        Mmax = max(abs(M_gk), abs(M_qk), abs(M_Ed),
+                   abs(M_gk_x), abs(M_qk_x), abs(M_Ed_x), 1.0) * 1.15
+        return y_m_bot - M / Mmax * plot_h_m
+
+    def py_v(V):
+        """将剪力 (kN) 映射到 SVG y"""
+        Vmax = max(abs(V_gk), abs(V_qk), abs(V_Ed), -V_gk, -V_qk, -V_Ed, 1.0) * 1.2
+        mid = (y_v_top + y_v_bot) / 2
+        return mid - V / Vmax * (plot_h_v / 2)
+
+    def line(x1, y1, x2, y2, color="#000", sw=1.0, dash=None):
+        d = ' stroke-dasharray="%s"' % dash if dash else ''
+        return ('<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" '
+                'stroke="%s" stroke-width="%.1f"%s/>' % (x1, y1, x2, y2, color, sw, d))
+
+    def txt(x, y, text, anchor="middle", size=10, color="#333", bold=False):
+        b = ' font-weight="bold"' if bold else ''
+        return ('<text x="%.1f" y="%.1f" text-anchor="%s" font-size="%d" '
+                'fill="%s"%s>%s</text>' % (x, y, anchor, size, color, b, text))
+
+    def arrow(x1, y1, x2, y2, color="#444", sw=0.8):
+        return ('<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" '
+                'stroke="%s" stroke-width="%.1f" marker-end="url(#arrowhead)"/>' %
+                (x1, y1, x2, y2, color, sw))
+
+    parts = []
+    a = parts.append
+
+    # SVG 容器
+    a('<div style="text-align:center;margin:15px 0;">')
+    a('<svg width="%d" height="%d" xmlns="http://www.w3.org/2000/svg" '
+      'style="font-family:SimSun,Times New Roman,serif;">' % (svg_w, svg_h))
+
+    # 箭头定义
+    a('<defs>')
+    a('<marker id="arrowhead" markerWidth="8" markerHeight="6" '
+      'refX="8" refY="3" orient="auto">')
+    a('<polygon points="0 0, 8 3, 0 6" fill="#444"/>')
+    a('</marker>')
+    a('</defs>')
+
+    # ===== 弯矩图 =====
+    a(txt(px(L/2), y_m_top - 8, "弯矩图 M (kN·m)", "middle", 12, "#000", True))
+
+    # 基线
+    a(line(x_left, y_m_bot, x_right, y_m_bot, "#000", 1.2))
+    # 左纵轴
+    a(line(x_left, y_m_top, x_left, y_m_bot, "#000", 1.2))
+
+    # 标注最大值
+    Mmax_val = max(abs(M_gk), abs(M_qk), abs(M_Ed), 1.0) * 1.15
+    a(txt(x_left - 8, y_m_top + 10, "%.0f" % Mmax_val, "end", 9, "#555"))
+    a(txt(x_left - 8, y_m_bot, "0", "end", 9, "#555"))
+    # 标注位置
+    a(txt(px(L/2), y_m_bot + 15, "L/2", "middle", 9, "#555"))
+    a(txt(px(0), y_m_bot + 15, "0", "middle", 9, "#555"))
+    a(txt(px(L), y_m_bot + 15, "L", "middle", 9, "#555"))
+    a(txt(px(x_cut), y_m_bot + 28, "L/6", "middle", 9, "#555"))
+
+    # 虚线标出 x_cut 位置
+    a(line(px(x_cut), y_m_top, px(x_cut), y_v_bot + 15, "#999", 0.6, "4,4"))
+
+    # M_gk 曲线 (抛物线, 多点近似)
+    npts = 40
+    pts_gk = []
+    pts_qk = []
+    for i in range(npts + 1):
+        xi = L * i / npts
+        Mi_gk = g * xi * (L - xi) / 2.0
+        Mi_qk = q * xi * (L - xi) / 2.0 + P * xi / 2.0  # xi ≤ L/2 only
+        pts_gk.append("%.1f,%.1f" % (px(xi), py_m(Mi_gk)))
+        if xi <= L / 2:
+            pts_qk.append("%.1f,%.1f" % (px(xi), py_m(Mi_qk)))
+        else:
+            pts_qk.append("%.1f,%.1f" % (px(xi), py_m(Mi_qk)))
+    # Fix: for xi > L/2, the concentrated load moment is P*(L-xi)/2
+    pts_qk = []
+    for i in range(npts + 1):
+        xi = L * i / npts
+        Mi_qk = q * xi * (L - xi) / 2.0
+        if xi <= L / 2:
+            Mi_qk += P * xi / 2.0
+        else:
+            Mi_qk += P * (L - xi) / 2.0
+        pts_qk.append("%.1f,%.1f" % (px(xi), py_m(Mi_qk)))
+
+    a('<polyline points="%s" fill="none" stroke="#2196F3" stroke-width="1.8"/>' % ' '.join(pts_gk))
+    a('<polyline points="%s" fill="none" stroke="#FF9800" stroke-width="1.8"/>' % ' '.join(pts_qk))
+
+    # M_Ed 曲线 (缩放后的组合)
+    pts_Ed = []
+    for i in range(npts + 1):
+        xi = L * i / npts
+        Mi_gk_i = g * xi * (L - xi) / 2.0
+        Mi_qk_i = q * xi * (L - xi) / 2.0
+        if xi <= L / 2:
+            Mi_qk_i += P * xi / 2.0
+        else:
+            Mi_qk_i += P * (L - xi) / 2.0
+        gamma_G = 1.2; gamma_Q = 1.4; gamma_0 = 1.1; mu = 1.14
+        Mi_Ed = gamma_0 * (gamma_G * Mi_gk_i + gamma_Q * mu * Mi_qk_i)
+        pts_Ed.append("%.1f,%.1f" % (px(xi), py_m(Mi_Ed)))
+    a('<polyline points="%s" fill="none" stroke="#E91E63" stroke-width="2.2"/>' % ' '.join(pts_Ed))
+
+    # 图例
+    a(txt(px(L) - 20, y_m_top + 10, "M_gk", "end", 9, "#2196F3", True))
+    a(txt(px(L) - 20, y_m_top + 24, "M_qk", "end", 9, "#FF9800", True))
+    a(txt(px(L) - 20, y_m_top + 38, "M_Ed", "end", 9, "#E91E63", True))
+
+    # ===== 剪力图 =====
+    a(txt(px(L/2), y_v_top - 8, "剪力图 V (kN)", "middle", 12, "#000", True))
+
+    # 基线
+    v_mid_y = (y_v_top + y_v_bot) / 2
+    a(line(x_left, v_mid_y, x_right, v_mid_y, "#000", 1.2))
+    # 左纵轴
+    a(line(x_left, y_v_top, x_left, y_v_bot, "#000", 1.2))
+
+    # 标注
+    Vmax_val = max(abs(V_gk), abs(V_qk), abs(V_Ed), 1.0) * 1.2
+    a(txt(x_left - 8, y_v_top + 8, "+%.0f" % Vmax_val, "end", 9, "#555"))
+    a(txt(x_left - 8, v_mid_y, "0", "end", 9, "#555"))
+    a(txt(x_left - 8, y_v_bot - 2, "-%.0f" % Vmax_val, "end", 9, "#555"))
+
+    # V_gk (线性)
+    a(line(px(0), py_v(V_gk), px(L), py_v(-V_gk), "#2196F3", 1.8))
+    # V_qk: 均布 + 集中力在跨中产生突变
+    # 0 → L/2: V = q*(L/2-x) + P_s/2
+    # L/2 → L: V = -q*(x-L/2) - P_s/2
+    a(line(px(0), py_v(V_qk), px(L/2 - 0.01), py_v(P_s/2), "#FF9800", 1.8))
+    a(line(px(L/2 + 0.01), py_v(-P_s/2), px(L), py_v(-V_qk), "#FF9800", 1.8))
+
+    # V_Ed
+    V0_Ed = 1.1 * (1.2 * V_gk + 1.4 * 1.14 * V_qk)
+    a(line(px(0), py_v(V0_Ed), px(L), py_v(-V0_Ed), "#E91E63", 2.2))
+
+    # 图例
+    a(txt(px(L) - 20, y_v_top + 10, "V_gk", "end", 9, "#2196F3", True))
+    a(txt(px(L) - 20, y_v_top + 24, "V_qk", "end", 9, "#FF9800", True))
+    a(txt(px(L) - 20, y_v_top + 38, "V_Ed", "end", 9, "#E91E63", True))
+
+    a('</svg>')
+    a('<p><strong>图 4.1&emsp;简支梁弯矩图与剪力图</strong></p>')
+    a('</div>')
+
+    return '\n'.join(parts)
+
+
+# ============================================================
+# 变截面布置示意图 (纯 SVG)
+# ============================================================
+
+def _make_variable_section_layout_svg(L, x_cut, sec_mid, sec_var):
+    """生成变截面布置示意图
+    sec_mid, sec_var: (h_w, t_w, b_f, t_f)
+    """
+    hw_mid, tw_mid, bf_mid, tf_mid = sec_mid
+    hw_var, tw_var, bf_var, tf_var = sec_var
+    svg_w, svg_h = 680, 200
+    margin_l, margin_r = 80, 60
+    plot_w = svg_w - margin_l - margin_r
+    x_left = margin_l
+
+    def px(x_m):
+        return margin_l + x_m / L * plot_w
+
+    parts = []
+    a = parts.append
+
+    a('<div style="text-align:center;margin:15px 0;">')
+    a('<svg width="%d" height="%d" xmlns="http://www.w3.org/2000/svg" '
+      'style="font-family:SimSun,Times New Roman,serif;">' % (svg_w, svg_h))
+
+    # 梁体 (变截面示意)
+    beam_y_top = 50
+    beam_h_mid = 60
+    beam_h_var = 40
+    a('<rect x="%.1f" y="%.1f" width="%.1f" height="%d" fill="#c8daf0" '
+      'stroke="#333" stroke-width="1.2"/>' %
+      (px(0), beam_y_top + beam_h_mid - beam_h_var + 10,
+       px(L) - px(0), beam_h_var))
+
+    # 跨中等截面段 (较厚翼缘)
+    seg_mid_left = px(x_cut)
+    seg_mid_right = px(L - x_cut)
+    a('<rect x="%.1f" y="%.1f" width="%.1f" height="%d" fill="#7ea8d4" '
+      'stroke="#333" stroke-width="1.2"/>' %
+      (seg_mid_left, beam_y_top,
+       seg_mid_right - seg_mid_left, beam_h_mid))
+
+    # 标注
+    def txt(x, y, text, anchor="middle", size=10, color="#333", bold=False):
+        b = ' font-weight="bold"' if bold else ''
+        return ('<text x="%.1f" y="%.1f" text-anchor="%s" font-size="%d" '
+                'fill="%s"%s>%s</text>' % (x, y, anchor, size, color, b, text))
+
+    def line(x1, y1, x2, y2, sw=0.7, dash=None):
+        d = ' stroke-dasharray="%s"' % dash if dash else ''
+        return ('<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" '
+                'stroke="#555" stroke-width="%.1f"%s/>' % (x1, y1, x2, y2, sw, d))
+
+    # 支座标记
+    a('<polygon points="%.1f,%d %.1f,%d %.1f,%d" fill="#555"/>' %
+      (px(0), beam_y_top + beam_h_mid + 10,
+       px(0) - 15, beam_y_top + beam_h_mid + 30,
+       px(0) + 15, beam_y_top + beam_h_mid + 30))
+    a('<polygon points="%.1f,%d %.1f,%d %.1f,%d" fill="#555"/>' %
+      (px(L), beam_y_top + beam_h_mid + 10,
+       px(L) - 15, beam_y_top + beam_h_mid + 30,
+       px(L) + 15, beam_y_top + beam_h_mid + 30))
+
+    # 尺寸标注
+    a(txt(px(0), beam_y_top + beam_h_mid + 45, "0", "middle", 9, "#555"))
+    a(txt(px(L), beam_y_top + beam_h_mid + 45, "L=%.0fm" % L, "middle", 9, "#555"))
+    a(txt(px(x_cut), beam_y_top + beam_h_mid + 55, "L/6=%.2fm" % x_cut, "middle", 9, "#E91E63"))
+    a(txt(px(L - x_cut), beam_y_top + beam_h_mid + 55, "5L/6", "middle", 9, "#E91E63"))
+
+    # 虚线标变截面位置
+    a(line(px(x_cut), beam_y_top - 10, px(x_cut), beam_y_top + beam_h_mid + 20, 0.7, "5,3"))
+    a(line(px(L - x_cut), beam_y_top - 10, px(L - x_cut), beam_y_top + beam_h_mid + 20, 0.7, "5,3"))
+
+    # 截面标注
+    mids = [(px(L/2), "跨中段", sec_mid),
+            (px(L/2 - L/4), "跨中段", sec_mid),
+            (px(L/12), "变截面段", sec_var),
+            (px(L - L/12), "变截面段", sec_var)]
+    # 简化截面标注
+    a(txt(px(L/2), beam_y_top - 5, "跨中段: %dx%d / %dx%d" %
+          (hw_mid, tw_mid, bf_mid, tf_mid),
+          "middle", 9, "#333", True))
+    y_var_label = beam_y_top + beam_h_mid + 70
+    a(txt(px(x_cut/2), y_var_label, "变截面段: %dx%d / %dx%d" %
+          (hw_var, tw_var, bf_var, tf_var),
+          "middle", 9, "#333"))
+    a(txt(px(L - x_cut/2), y_var_label, "变截面段: %dx%d / %dx%d" %
+          (hw_var, tw_var, bf_var, tf_var),
+          "middle", 9, "#333"))
+
+    a('</svg>')
+    a('<p><strong>图 6.1&emsp;变截面布置示意图</strong></p>')
+    a('</div>')
+
+    return '\n'.join(parts)
+
+
+# ============================================================
+# 加劲肋布置示意图 (纯 SVG)
+# ============================================================
+
+def _make_stiffener_layout_svg(L, spacing, n_pairs):
+    """生成横向加劲肋布置示意图"""
+    svg_w, svg_h = 700, 190
+    margin_l, margin_r = 50, 50
+    plot_w = svg_w - margin_l - margin_r
+
+    def px(x_mm):
+        return margin_l + x_mm / (L * 1000.0) * plot_w
+
+    parts = []
+    a = parts.append
+
+    a('<div style="text-align:center;margin:15px 0;">')
+    a('<svg width="%d" height="%d" xmlns="http://www.w3.org/2000/svg" '
+      'style="font-family:SimSun,Times New Roman,serif;">' % (svg_w, svg_h))
+
+    def txt(x, y, text, anchor="middle", size=10, color="#333", bold=False):
+        b = ' font-weight="bold"' if bold else ''
+        return ('<text x="%.1f" y="%.1f" text-anchor="%s" font-size="%d" '
+                'fill="%s"%s>%s</text>' % (x, y, anchor, size, color, b, text))
+
+    def line(x1, y1, x2, y2, sw=0.7, dash=None):
+        d = ' stroke-dasharray="%s"' % dash if dash else ''
+        return ('<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" '
+                'stroke="#555" stroke-width="%.1f"%s/>' % (x1, y1, x2, y2, sw, d))
+
+    # 主梁
+    beam_y = 55
+    beam_h = 28
+    a('<rect x="%.1f" y="%d" width="%.1f" height="%d" fill="#d0dce8" '
+      'stroke="#333" stroke-width="1.2"/>' %
+      (px(0), beam_y, px(L * 1000) - px(0), beam_h))
+
+    # 支座标记（三角形）
+    a('<polygon points="%.1f,%d %.1f,%d %.1f,%d" fill="#333"/>' %
+      (px(0), beam_y + beam_h + 4, px(0) - 12, beam_y + beam_h + 20,
+       px(0) + 12, beam_y + beam_h + 20))
+    a('<polygon points="%.1f,%d %.1f,%d %.1f,%d" fill="#333"/>' %
+      (px(L * 1000), beam_y + beam_h + 4,
+       px(L * 1000) - 12, beam_y + beam_h + 20,
+       px(L * 1000) + 12, beam_y + beam_h + 20))
+
+    # 横向加劲肋（竖线，从梁顶上方冒出 + 梁下方一小段）
+    stiff_top = beam_y - 12
+    stiff_bot = beam_y + beam_h + 6
+    n_total = int(L * 1000 / spacing) + 1
+    for i in range(1, n_total - 1):  # 跳过两端（支座加劲肋）
+        xi_mm = i * spacing
+        if xi_mm < L * 1000:
+            a(line(px(xi_mm), stiff_top, px(xi_mm), stiff_bot, 1.0))
+            # 顶部小横线
+            a(line(px(xi_mm) - 3, stiff_top, px(xi_mm) + 3, stiff_top, 0.7))
+
+    # 间距标注（在第一、二根横向加劲肋之间，不会被支座加劲肋文字遮盖）
+    x1 = px(spacing)
+    x2 = px(2 * spacing) if 2 * spacing < L * 1000 else px(spacing)
+    x_mid = (x1 + x2) / 2
+    a(line(x1, stiff_top - 8, x2, stiff_top - 8, 0.7))
+    a(line(x1, stiff_top - 11, x1, stiff_top - 5, 0.7))
+    a(line(x2, stiff_top - 11, x2, stiff_top - 5, 0.7))
+    a(txt(x_mid, stiff_top - 14, "a=%dmm" % spacing, "middle", 10, "#E91E63", True))
+
+    # 支座加劲肋（粗线 + 标注，放在梁下方避免与间距标注重叠）
+    a(line(px(0), beam_y - 5, px(0), beam_y + beam_h + 5, 2.0))
+    a(line(px(L * 1000), beam_y - 5, px(L * 1000), beam_y + beam_h + 5, 2.0))
+    a(txt(px(0), beam_y + beam_h + 38, "支座\n加劲肋", "middle", 9, "#333", True))
+
+    # 右端支座（用 position 判断是否与 stiffeners 太近）
+    a(txt(px(L * 1000), beam_y + beam_h + 38, "支座\n加劲肋", "middle", 9, "#333", True))
+
+    # 底部总说明
+    a(txt(margin_l + plot_w / 2, svg_h - 14,
+          "横向加劲肋共 %d 对，间距 a = %d mm，成对布置于腹板两侧" % (n_pairs, spacing),
+          "middle", 11, "#333", True))
+
+    a('</svg>')
+    a('<p><strong>图 8.1&emsp;加劲肋布置示意图</strong></p>')
+    a('</div>')
+
+    return '\n'.join(parts)
+
+
+# ============================================================
 # HTML 内容生成
 # ============================================================
 
@@ -443,6 +802,12 @@ def generate_html(r: CalcResult) -> str:
     a('<p><strong>剪力设计值：</strong></p>')
     a(_md("V_{Ed} = " + LX.GAMMA + "_0 [" + LX.GAMMA + "_G \\times V_{gk} + " + LX.GAMMA +
           "_Q \\times (1+" + LX.MU + ") \\times V_{qk}] = %.2f\\,\\mathrm{kN}" % r.V_Ed))
+    a('')
+    a(_make_moment_shear_diagrams(
+        p.L, r.g, r.q, r.P, r.P_s, r.x_cut,
+        r.M_gk, r.M_qk, r.M_Ed,
+        r.M_gk_x, r.M_qk_x, r.M_Ed_x,
+        r.V_gk, r.V_qk, r.V_Ed))
 
     # ============== 五、跨中强度及刚度验算 ==============
     a('<h2>五、跨中截面强度及刚度验算</h2>')
@@ -454,12 +819,11 @@ def generate_html(r: CalcResult) -> str:
         _mi("f_d = %d\\,\\mathrm{MPa}" % r.f_d_mid)))
     a(_md(LX.SIGMA + " = M_{Ed} / W_x = %.2f \\times 10^6 / (%.2f \\times 10^3) = %.1f\\,\\mathrm{MPa}" %
           (r.M_Ed, pm.W_x / 1e3, c.sigma_mid)))
-    margin_s = (1 - c.sigma_mid / c.sigma_mid_limit) * 100
     cls_s = 'ok' if c.sigma_mid_ok else 'ng'
     ok_s = '满足' if c.sigma_mid_ok else '不满足'
-    a('<p><strong>%s &nbsp; [<span class="%s">%s</span>] &nbsp; 安全储备 %.1f%%</strong></p>' % (
+    a('<p><strong>%s &nbsp; [<span class="%s">%s</span>]</strong></p>' % (
         _mi(LX.SIGMA + " = %.1f\\,\\mathrm{MPa} < f_d = %d\\,\\mathrm{MPa}" % (c.sigma_mid, c.sigma_mid_limit)),
-        cls_s, ok_s, margin_s))
+        cls_s, ok_s))
 
     a('<h3>5.2 抗剪强度（JTG D64-2015 第5.3条）</h3>')
     a('<p>腹板中性轴处剪应力最大，t<sub>w</sub> = %d mm，取 %s。</p>' % (sec.t_w, _mi("f_{vd} = %d\\,\\mathrm{MPa}" % r.f_vd_mid)))
@@ -498,17 +862,40 @@ def generate_html(r: CalcResult) -> str:
     a(_md(LX.DELTA + "_c = \\frac{P L^3}{48 E I_x} = %.1f\\,\\mathrm{mm}" % delta_c))
     a(_md(LX.DELTA + "_q = " + LX.DELTA + "_u + " + LX.DELTA + "_c = %.1f\\,\\mathrm{mm}" % c.deflection_q))
     a(_md("[" + LX.DELTA + "] = L / 500 = %.1f\\,\\mathrm{mm}" % c.deflection_limit))
-    margin_d = (1 - c.deflection_q / c.deflection_limit) * 100
     cls_d = 'ok' if c.deflection_q_ok else 'ng'
     ok_d = '满足' if c.deflection_q_ok else '不满足'
-    a('<p><strong>%s &nbsp; [<span class="%s">%s</span>] &nbsp; 安全储备 %.1f%%</strong></p>' % (
+    a('<p><strong>%s &nbsp; [<span class="%s">%s</span>]</strong></p>' % (
         _mi((LX.DELTA + "_q = %.1f\\,\\mathrm{mm} < [" + LX.DELTA + "] = %.1f\\,\\mathrm{mm}") % (c.deflection_q, c.deflection_limit)),
-        cls_d, ok_d, margin_d))
-    a('<p>恒载挠度 &delta;<sub>g</sub> = %.1f mm，总挠度 = %.1f mm &lt; L/400 = %.1f mm，满足视觉舒适度要求。</p>' %
-      (c.deflection_g, c.deflection_total, p.L * 1000 / 400))
+        cls_d, ok_d))
+    a('<p>恒载挠度 &delta;<sub>g</sub> = %.1f mm，总挠度 = %.1f mm &lt; L/500 = %.1f mm，满足挠度验算要求。</p>' %
+      (c.deflection_g, c.deflection_total, p.L * 1000 / 500))
 
     a('<h3>5.5 整体稳定性（JTG D64-2015 第5.5条）</h3>')
-    a('<p>混凝土桥面板通过剪力连接件为受压上翼缘提供连续侧向支撑，<strong>整体稳定性自然满足，无需验算</strong>。</p>')
+
+    # 翼缘局部稳定
+    b1 = (sec.b_f - sec.t_w) / 2.0
+    fy = 345.0 if p.steel_grade == "Q345" else 235.0
+    corr_local = math.sqrt(235.0 / fy)
+    local_limit = 15.0 * corr_local
+
+    a('<h4>5.5.1 翼缘局部稳定（JTG D64-2015 第5.7节）</h4>')
+    a('<p>受压翼缘自由外伸宽度 b<sub>1</sub> 与厚度 t<sub>f</sub> 之比应满足：</p>')
+    a(_md("b_1 = (b_f - t_w) / 2 = (%.0f - %.0f) / 2 = %.0f\\,\\mathrm{mm}" %
+          (sec.b_f, sec.t_w, b1)))
+    a(_md("\\frac{b_1}{t_f} = \\frac{%.0f}{%.0f} = %.2f" % (b1, sec.t_f, c.flange_local_ratio)))
+    a('<p>限值：%s</p>' % _mi("15 \\sqrt{235 / f_y} = 15 \\times %.3f = %.1f" % (corr_local, local_limit)))
+    fl_cls = 'ok' if c.flange_local_ok else 'ng'
+    fl_ok = '满足' if c.flange_local_ok else '不满足'
+    a('<p><strong>%s &nbsp; [<span class="%s">%s</span>]</strong></p>' %
+      (_mi("\\frac{b_1}{t_f} = %.2f \\leq %.1f" % (c.flange_local_ratio, local_limit)), fl_cls, fl_ok))
+
+    a('<h4>5.5.2 整体稳定性（JTG D64-2015 第5.5.2条）</h4>')
+    a('<p>依据 JTG D64-2015 第5.5.2条第1款：</p>')
+    a('<p style="padding-left:2em;">"有钢筋混凝土铺板密铺在梁的受压翼缘上并与其牢固连接、'
+      '能阻止梁受压翼缘的侧向位移时，可不计算整体稳定性。"</p>')
+    a('<p>本桥采用钢-混凝土叠合梁，混凝土桥面板通过焊钉剪力连接件与钢主梁上翼缘焊接，'
+      '两者形成牢固连接，桥面板为受压上翼缘提供连续侧向约束。'
+      '<strong>因此整体稳定自然满足，无需计算。</strong></p>')
 
     a('<h3>5.6 疲劳强度（JTG D64-2015 第5.6节及附录C）</h3>')
     a('<p>采用疲劳荷载模型 I（等效车道荷载乘 0.7 折减系数）：</p>')
@@ -561,6 +948,10 @@ def generate_html(r: CalcResult) -> str:
     a('<tr><td>截面模量 W<sub>x</sub> (cm<sup>3</sup>)</td><td>%.2f</td><td>%.2f</td></tr>' %
       (pm.W_x / 1e3, pv.W_x / 1e3))
     a('</table>')
+
+    a(_make_variable_section_layout_svg(p.L, r.x_cut,
+        (sec.h_w, sec.t_w, sec.b_f, sec.t_f),
+        (sec.h_w, sec.t_w, sec.b_f2, sec.t_f2)))
 
     a('<h3>6.4 变截面处强度验算</h3>')
     cls_v = 'ok' if c.sigma_var_ok else 'ng'; ok_v = '满足' if c.sigma_var_ok else '不满足'
@@ -635,6 +1026,27 @@ def generate_html(r: CalcResult) -> str:
           (st.b_s, st.t_s))
         a('<p>横向加劲肋与腹板采用双面角焊缝，h<sub>f</sub> = 6 mm。加劲肋两端不与翼缘焊接。</p>')
 
+    if st.need_transverse:
+        a('<h4>8.1.1 腹板区格受剪屈曲（JTG D64-2015 第5.7.4条）</h4>')
+        a_show = st.spacing
+        ratio_a_hw = a_show / sec.h_w
+        k_tau = 5.34 + 4.00 / ratio_a_hw ** 2 if ratio_a_hw >= 1.0 else 4.00 + 5.34 / ratio_a_hw ** 2
+        a('<p>横向加劲肋间距 a = %.0f mm，a/h<sub>w</sub> = %.3f。剪切屈曲系数：</p>' % (a_show, ratio_a_hw))
+        a(_md("k_\\tau = %.3f" % k_tau))
+        eps_k = math.sqrt(235.0 / 345.0)
+        lam_s = (sec.h_w / sec.t_w) / (41.0 * eps_k * math.sqrt(k_tau))
+        a('<p>正则化高厚比 &lambda;<sub>s</sub> = (%.1f) / (41 &times; %.3f &times; &radic;(%.3f)) = %.3f</p>' %
+          (st.hw_tw_ratio, eps_k, k_tau, lam_s))
+        a('<p>腹板平均剪应力：&tau; = %.1f MPa，受剪屈曲临界应力：&tau;<sub>cr</sub> = %.1f MPa。</p>' %
+          (st.tau_web, st.tau_cr))
+        cls_sb = 'ok' if st.shear_buckling_ok else 'ng'
+        ok_sb = '满足' if st.shear_buckling_ok else '不满足'
+        a('<p><strong>%s &nbsp; [<span class="%s">%s</span>]</strong></p>' % (
+            _mi("\\tau = %.1f\\,\\mathrm{MPa} < \\tau_{cr} = %.1f\\,\\mathrm{MPa}" % (st.tau_web, st.tau_cr)),
+            cls_sb, ok_sb))
+
+    a(_make_stiffener_layout_svg(p.L, st.spacing, st.n_pairs))
+
     a('<h3>8.2 支座加劲肋（支承加劲肋）</h3>')
     a('<p>支座反力 %s。采用 <strong>%d 块</strong> 竖向加劲肋，尺寸 %d &times; %d mm，端部刨平顶紧于下翼缘。</p>' %
       (_mi("R = V_{Ed} = %.2f\\,\\mathrm{kN}" % r.V_Ed), st.bearing_n, st.bearing_b, st.bearing_t))
@@ -661,7 +1073,7 @@ def generate_html(r: CalcResult) -> str:
         _mi("A_{\\mathrm{eff}} = %.0f\\,\\mathrm{mm^2}" % A_eff),
         _mi("i_{\\mathrm{eff}} = %.1f\\,\\mathrm{mm}" % i_eff),
         _mi(LX.LAMBDA + " = h_w / i_{\\mathrm{eff}} = %.1f" % lam)))
-    a('<p>a 类截面，%s，稳定系数 %s：</p>' % (_mi(LX.LAMBDA + " = %.1f" % lam), _mi(LX.VARPHI + " = 0.900")))
+    a('<p>b 类截面，%s，稳定系数 %s：</p>' % (_mi(LX.LAMBDA + " = %.1f" % lam), _mi(LX.VARPHI + " = %.3f" % st.phi_bearing)))
     cls_st = 'ok' if st.stab_ok else 'ng'; ok_st = '满足' if st.stab_ok else '不满足'
     a('<p><strong>%s &nbsp; [<span class="%s">%s</span>]</strong></p>' % (
         _mi(LX.SIGMA + " = R / (" + LX.VARPHI + " \\times A_{\\mathrm{eff}}) = %.1f\\,\\mathrm{MPa} < f_d = %d\\,\\mathrm{MPa}" %
@@ -713,14 +1125,16 @@ def generate_html(r: CalcResult) -> str:
         (2, "跨中抗剪 &tau;<sub>max</sub>", "%.1f MPa" % c.tau_max, "%.0f MPa" % c.tau_max_limit, c.tau_max_ok),
         (3, "折算应力 &sigma;<sub>zs</sub>", "%.1f MPa" % c.sigma_zs, "%.0f MPa" % c.sigma_zs_limit, c.sigma_zs_ok),
         (4, "活载挠度 &delta;<sub>q</sub>", "%.1f mm" % c.deflection_q, "%.1f mm" % c.deflection_limit, c.deflection_q_ok),
-        (5, "整体稳定", "&mdash;", "&mdash;", True),
-        (6, "疲劳 &Delta;&sigma;<sub>p</sub> (母材)", "%.1f MPa" % ft.delta_sigma_p, "%.1f MPa" % ft.delta_sigma_D_base, ft.check_base_metal),
-        (7, "疲劳 &Delta;&sigma;<sub>p</sub> (焊缝)", "%.1f MPa" % ft.delta_sigma_p, "%.1f MPa" % ft.delta_sigma_D_weld, ft.check_fillet_weld),
-        (8, "变截面抗弯 &sigma;", "%.1f MPa" % c.sigma_var, "%.0f MPa" % c.sigma_var_limit, c.sigma_var_ok),
-        (9, "变截面抗剪 &tau;", "%.1f MPa" % c.tau_var, "%.0f MPa" % c.tau_var_limit, c.tau_var_ok),
-        (10, "变截面折算 &sigma;<sub>zs</sub>", "%.1f MPa" % c.sigma_zs_var, "%.0f MPa" % c.sigma_zs_var_limit, c.sigma_zs_var_ok),
-        (11, "支座承压 &sigma;<sub>ce</sub>", "%.1f MPa" % st.sigma_ce, "355 MPa", st.ce_ok),
-        (12, "支座稳定 &sigma;", "%.1f MPa" % st.sigma_stab, "%.0f MPa" % r.f_d_mid, st.stab_ok),
+        (5, "翼缘局部稳定 b₁/t_f", "%.2f" % c.flange_local_ratio, "%.1f" % c.flange_local_limit, c.flange_local_ok),
+        (6, "整体稳定性", "&mdash;", "&mdash;", True),
+        (7, "疲劳 &Delta;&sigma;<sub>p</sub> (母材)", "%.1f MPa" % ft.delta_sigma_p, "%.1f MPa" % ft.delta_sigma_D_base, ft.check_base_metal),
+        (8, "疲劳 &Delta;&sigma;<sub>p</sub> (焊缝)", "%.1f MPa" % ft.delta_sigma_p, "%.1f MPa" % ft.delta_sigma_D_weld, ft.check_fillet_weld),
+        (9, "变截面抗弯 &sigma;", "%.1f MPa" % c.sigma_var, "%.0f MPa" % c.sigma_var_limit, c.sigma_var_ok),
+        (10, "变截面抗剪 &tau;", "%.1f MPa" % c.tau_var, "%.0f MPa" % c.tau_var_limit, c.tau_var_ok),
+        (11, "变截面折算 &sigma;<sub>zs</sub>", "%.1f MPa" % c.sigma_zs_var, "%.0f MPa" % c.sigma_zs_var_limit, c.sigma_zs_var_ok),
+        (12, "支座承压 &sigma;<sub>ce</sub>", "%.1f MPa" % st.sigma_ce, "355 MPa", st.ce_ok),
+        (13, "支座稳定 &sigma;", "%.1f MPa" % st.sigma_stab, "%.0f MPa" % r.f_d_mid, st.stab_ok),
+        (14, "腹板受剪屈曲 &tau;", "%.1f MPa" % st.tau_web, "%.1f MPa" % st.tau_cr, st.shear_buckling_ok),
     ]
     for i, name, val, lim, ok_ in check_items:
         cls = 'ok' if ok_ else 'ng'
