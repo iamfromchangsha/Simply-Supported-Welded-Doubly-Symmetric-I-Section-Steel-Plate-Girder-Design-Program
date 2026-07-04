@@ -1,0 +1,4 @@
+{
+    "upload_url": "https:///api/report",
+    "_comment": "HTTPS 自签名证书方式上报。局域网内使用自签名 cert.pem + key.pem。"
+}

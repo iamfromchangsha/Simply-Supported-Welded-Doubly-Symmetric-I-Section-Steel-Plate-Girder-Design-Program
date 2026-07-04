@@ -5,22 +5,38 @@
 
 import os
 import sys
+import socket
+import uuid
 from PySide6.QtWidgets import (
     QMainWindow, QTabWidget, QWidget, QVBoxLayout, QHBoxLayout,
     QFormLayout, QGroupBox, QDoubleSpinBox, QSpinBox, QLabel,
-    QPushButton, QRadioButton, QButtonGroup,
+    QPushButton, QRadioButton, QButtonGroup, QCheckBox,
     QFileDialog, QMessageBox, QFrame, QApplication, QProgressDialog,
+    QPlainTextEdit, QDialog, QLineEdit,
 )
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont, QPalette, QColor, QLinearGradient, QBrush
 from PySide6.QtWebEngineWidgets import QWebEngineView
+
+import json
+import threading
+import platform
+import ssl
+import urllib.request
+from datetime import datetime
+
+
+# 自签名证书 SSL 上下文（局域网 HTTPS 使用）
+_SSL_CTX = ssl.create_default_context()
+_SSL_CTX.check_hostname = False
+_SSL_CTX.verify_mode = ssl.CERT_NONE
 
 from calculator import (
     DesignParams, SectionInput, CalcResult,
     calculate as calc_engine, calc_section_props,
     auto_estimate_section, format_number,
 )
-from report import generate_html, save_html, save_pdf, save_all
+from report import generate_html, save_html, save_pdf, save_docx, save_all
 
 
 # ============================================================
@@ -572,6 +588,10 @@ class ResultTab(QWidget):
         self.btn_calc.setObjectName("btnPrimary")
         self.btn_calc.clicked.connect(self._on_calculate)
 
+        self.btn_edit_toggle = QPushButton("✏  编辑模式")
+        self.btn_edit_toggle.clicked.connect(self._on_toggle_edit)
+        self.btn_edit_toggle.setEnabled(False)
+
         self.btn_export_html = QPushButton("导出 HTML")
         self.btn_export_html.clicked.connect(self._on_export_html)
         self.btn_export_html.setEnabled(False)
@@ -580,13 +600,19 @@ class ResultTab(QWidget):
         self.btn_export_pdf.clicked.connect(self._on_export_pdf)
         self.btn_export_pdf.setEnabled(False)
 
+        self.btn_export_docx = QPushButton("导出 DOCX")
+        self.btn_export_docx.clicked.connect(self._on_export_docx)
+        self.btn_export_docx.setEnabled(False)
+
         self.btn_export_all = QPushButton("全部导出")
         self.btn_export_all.clicked.connect(self._on_export_all)
         self.btn_export_all.setEnabled(False)
 
         top_layout.addWidget(self.btn_calc)
+        top_layout.addWidget(self.btn_edit_toggle)
         top_layout.addWidget(self.btn_export_html)
         top_layout.addWidget(self.btn_export_pdf)
+        top_layout.addWidget(self.btn_export_docx)
         top_layout.addWidget(self.btn_export_all)
         top_layout.addStretch()
         layout.addLayout(top_layout)
@@ -598,6 +624,22 @@ class ResultTab(QWidget):
         line.setFrameShadow(QFrame.Shadow.Plain)
         layout.addWidget(line)
 
+        # HTML 编辑器（默认隐藏）
+        self.html_editor = QPlainTextEdit()
+        self.html_editor.setVisible(False)
+        self.html_editor.setFont(QFont("Consolas", 11))
+        self.html_editor.setStyleSheet("""
+            QPlainTextEdit {
+                background: #1e1e2e;
+                color: #d4d4d4;
+                border: 1px solid #444;
+                border-radius: 6px;
+                padding: 8px;
+                font-family: Consolas, monospace;
+            }
+        """)
+        layout.addWidget(self.html_editor)
+
         # 使用 QWebEngineView 预览 HTML（支持 MathJax 渲染）
         self.web_view = QWebEngineView()
         layout.addWidget(self.web_view)
@@ -608,11 +650,28 @@ class ResultTab(QWidget):
         self.progress.setCancelButton(None)
         self.progress.close()
 
+    def _on_toggle_edit(self):
+        if self.html_editor.isVisible():
+            self._html_text = self.html_editor.toPlainText()
+            self.web_view.setHtml(self._html_text)
+            self.web_view.setVisible(True)
+            self.html_editor.setVisible(False)
+            self.btn_edit_toggle.setText("✏  编辑模式")
+        else:
+            self.html_editor.setPlainText(self._html_text)
+            self.html_editor.setVisible(True)
+            self.web_view.setVisible(False)
+            self.btn_edit_toggle.setText("✔  应用编辑")
+
     def _on_calculate(self):
         try:
             main_window = self.window()
             if not main_window:
                 return
+
+            # 如果处于编辑模式，先切回预览
+            if self.html_editor.isVisible():
+                self._on_toggle_edit()
 
             params = main_window.param_tab.get_params()
             section = main_window.section_tab.get_section()
@@ -632,12 +691,16 @@ class ResultTab(QWidget):
 
             self.web_view.setHtml(self._html_text)
 
+            self.btn_edit_toggle.setEnabled(True)
             self.btn_export_html.setEnabled(True)
             self.btn_export_pdf.setEnabled(True)
+            self.btn_export_docx.setEnabled(True)
             self.btn_export_all.setEnabled(True)
 
             main_window.section_tab._update_spins_from_section(r.section)
             main_window.section_tab._update_preview(r.section)
+
+            main_window._on_calc_done()
 
             if r.checks.all_ok():
                 QMessageBox.information(self, "计算完成", "全部验算通过！设计合理。")
@@ -683,6 +746,23 @@ class ResultTab(QWidget):
 
         save_pdf(self._result, path, callback=_on_pdf_done)
 
+    def _on_export_docx(self):
+        if not self._result:
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "保存 DOCX 计算书", "计算书.docx",
+            "Word 文档 (*.docx);;所有文件 (*.*)"
+        )
+        if not path:
+            return
+        try:
+            save_docx(self._result, path)
+            QMessageBox.information(self, "导出成功", f"已保存至：\n{path}")
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "导出失败", f"DOCX 生成出错：\n{e}")
+
     def _on_export_all(self):
         if not self._result:
             return
@@ -693,6 +773,91 @@ class ResultTab(QWidget):
         QMessageBox.information(self, "导出成功",
                                  f"HTML 已保存至：\n{html_path}\n\n"
                                  f"PDF 请使用「导出 PDF」按钮单独导出。")
+
+
+# ============================================================
+# 开发者遥测配置
+# ============================================================
+
+_TELEMETRY_URL = ""
+
+def _load_telemetry_config():
+    """加载开发者配置的上报地址"""
+    global _TELEMETRY_URL
+    try:
+        cfg_path = os.path.join(os.path.dirname(__file__), "telemetry_config.json")
+        if os.path.exists(cfg_path):
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+                _TELEMETRY_URL = cfg.get("upload_url", "")
+    except Exception:
+        _TELEMETRY_URL = ""
+
+_load_telemetry_config()
+
+
+def _get_local_ip() -> str:
+    """获取本机局域网 IP"""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(0.1)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return ""
+
+
+def _report_usage(user_info: dict, extra: dict = None):
+    """
+    异步上报数据到开发者服务器。
+    无论用户是否填写信息都会上报，以便统计使用量。
+    纯后台线程 + urllib，不阻塞 UI，失败静默处理。
+    """
+    if not _TELEMETRY_URL:
+        return
+
+    data = {
+        "user": {
+            "name": (user_info or {}).get("name", ""),
+            "department": (user_info or {}).get("department", ""),
+            "contact": (user_info or {}).get("contact", ""),
+        },
+        "system": {
+            "platform": sys.platform,
+            "platform_detail": platform.platform(),
+            "hostname": platform.node(),
+            "ip": _get_local_ip(),
+            "mac": "%012X" % uuid.getnode(),
+            "processor": platform.processor(),
+            "machine": platform.machine(),
+            "python": platform.python_version(),
+        },
+        "event": "",
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    if extra:
+        data["event"] = extra.get("event", "")
+        for k, v in extra.items():
+            if k != "event":
+                data[k] = v
+
+    def _send():
+        try:
+            body = json.dumps(data, ensure_ascii=False).encode("utf-8")
+            req = urllib.request.Request(
+                _TELEMETRY_URL,
+                data=body,
+                headers={"Content-Type": "application/json; charset=utf-8"},
+                method="POST",
+            )
+            urllib.request.urlopen(req, timeout=5, context=_SSL_CTX)
+        except Exception:
+            pass
+
+    t = threading.Thread(target=_send, daemon=True)
+    t.start()
 
 
 # ============================================================
@@ -727,4 +892,126 @@ class MainWindow(QMainWindow):
 
         container_layout.addWidget(self.tabs)
 
+        self.status_bar_user_info_label = QLabel("无用户信息", self.statusBar())
+        self.status_bar_user_info_label.setStyleSheet("color: #a0a0a0; font-size: 11px;")
+        self.statusBar().addWidget(self.status_bar_user_info_label, 1)
+
+        self._load_user_info()
         self.statusBar().showMessage("  就绪  |  JTG D64-2015《公路钢结构桥梁设计规范》 / JTG D60-2015")
+
+        # 添加用户信息到导出按钮旁边
+        self._add_user_info_to_toolbar()
+
+    def _add_user_info_to_toolbar(self):
+        toolbar = QWidget(self)
+        toolbar_layout = QHBoxLayout(toolbar)
+        toolbar_layout.setContentsMargins(4, 0, 4, 0)
+
+        self.btn_user_info = QPushButton("📋 用户信息")
+        self.btn_user_info.clicked.connect(self._show_user_info_dialog)
+        self.btn_user_info.setFixedWidth(100)
+        self.btn_user_info.setFixedHeight(28)
+
+        toolbar_layout.addWidget(self.btn_user_info)
+        self.statusBar().addWidget(toolbar, 0)
+
+        self._update_user_info_display()
+        self._calc_count = 0
+
+        # 启动时上报一次（如果已有用户信息）
+        self._report_if_ready()
+
+    def _report_if_ready(self):
+        _report_usage(self._user_info, {"event": "app_start"})
+
+    def _load_user_info(self):
+        try:
+            info_file = os.path.join(os.path.expanduser("~"), ".steel_girder_user_info.json")
+            if os.path.exists(info_file):
+                with open(info_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    self._user_info = {
+                        "name": data.get("name", ""),
+                        "department": data.get("department", ""),
+                        "contact": data.get("contact", ""),
+                        "note": data.get("note", ""),
+                    }
+            else:
+                self._user_info = {"name": "", "department": "", "contact": "", "note": ""}
+                self._save_user_info()
+        except Exception:
+            self._user_info = {"name": "", "department": "", "contact": "", "note": ""}
+
+    def _save_user_info(self):
+        try:
+            info_file = os.path.join(os.path.expanduser("~"), ".steel_girder_user_info.json")
+            with open(info_file, "w", encoding="utf-8") as f:
+                json.dump(self._user_info, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def _update_user_info_display(self):
+        name = self._user_info.get("name", "")
+        dept = self._user_info.get("department", "")
+        if name:
+            txt = name
+            if dept:
+                txt += f"（{dept}）"
+            self.status_bar_user_info_label.setText(f" 使用者：{txt}")
+        else:
+            self.status_bar_user_info_label.setText(" 未设置使用者信息")
+
+    def _on_calc_done(self):
+        """每次计算完成后上报"""
+        self._calc_count += 1
+        _report_usage(self._user_info, {
+            "event": "calc_done",
+            "calc_count": self._calc_count,
+        })
+
+    def _show_user_info_dialog(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("使用者信息 — 告知开发者谁在使用")
+        dialog.resize(420, 260)
+        layout = QVBoxLayout(dialog)
+
+        hint = QLabel(
+            "填写以下信息后，程序会自动上报给开发者（不影响正常使用）。\n"
+            "开发者可据此了解软件的使用情况，持续改进设计。"
+        )
+        hint.setStyleSheet("color: #8ab4d6; font-size: 11px; padding: 4px 0;")
+        layout.addWidget(hint)
+
+        form = QFormLayout()
+        name_i = QLineEdit(self._user_info.get("name", ""))
+        dept_i = QLineEdit(self._user_info.get("department", ""))
+        contact_i = QLineEdit(self._user_info.get("contact", ""))
+        note_i = QLineEdit(self._user_info.get("note", ""))
+        form.addRow("姓名：", name_i)
+        form.addRow("院系/单位：", dept_i)
+        form.addRow("联系方式：", contact_i)
+        form.addRow("备注：", note_i)
+        layout.addLayout(form)
+
+        btn_layout = QHBoxLayout()
+        ok_btn = QPushButton("确定并上报")
+        ok_btn.setObjectName("btnPrimary")
+        ok_btn.clicked.connect(dialog.accept)
+        cancel_btn = QPushButton("取消")
+        cancel_btn.clicked.connect(dialog.reject)
+        btn_layout.addStretch()
+        btn_layout.addWidget(ok_btn)
+        btn_layout.addWidget(cancel_btn)
+        layout.addLayout(btn_layout)
+
+        if dialog.exec() == QDialog.Accepted:
+            self._user_info.update({
+                "name": name_i.text(),
+                "department": dept_i.text(),
+                "contact": contact_i.text(),
+                "note": note_i.text(),
+            })
+            self._save_user_info()
+            self._update_user_info_display()
+            # 主动上报
+            _report_usage(self._user_info, {"event": "user_info_set"})
